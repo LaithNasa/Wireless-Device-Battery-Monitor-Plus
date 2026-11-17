@@ -1,4 +1,5 @@
 #include "widget.h"
+#include "icons.h"
 
 #include <commctrl.h>
 #include <uiautomation.h>
@@ -119,16 +120,6 @@ void ApplyTipTheme() {
     }
 }
 
-wchar_t Glyph(DeviceKind k, bool bluetooth) {
-    switch (k) {
-        case DeviceKind::Headset:  return 0xE7F6;  // Headphone
-        case DeviceKind::Mouse:    return 0xE962;  // Mouse
-        case DeviceKind::Keyboard: return 0xE765;  // KeyboardClassic
-        case DeviceKind::Gamepad:  return 0xE7FC;  // Game
-        case DeviceKind::Phone:    return 0xE8EA;  // CellPhone
-        default:                   return bluetooth ? 0xE702 : 0xE772;  // Bluetooth / Devices
-    }
-}
 constexpr wchar_t kBolt = 0xE945;            // LightningBolt
 constexpr wchar_t kBatteryUnknown = 0xE996;  // shown when there is nothing to display
 
@@ -230,7 +221,8 @@ std::vector<Piece> Layout(int& width) {
         const auto& it = g_items[i];
         int a = it.dim ? 120 : 255;
         Rgb tc = it.low ? red : fg;
-        out.push_back({ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons), fg, a, Px(5) });
+        wchar_t glyph = it.glyph ? it.glyph : DefaultGlyph(it.kind, it.bluetooth);
+        out.push_back({ RenderMask(std::wstring(1, glyph), icons), fg, a, Px(5) });
         std::wstring t = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
         out.push_back({ RenderMask(t, text), tc, a, it.charging ? Px(2) : 0 });
         if (it.charging) out.push_back({ RenderMask(std::wstring(1, kBolt), bolt), charge, a, 0 });

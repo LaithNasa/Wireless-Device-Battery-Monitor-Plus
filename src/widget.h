@@ -8,6 +8,7 @@
 
 struct WidgetItem {
     DeviceKind kind = DeviceKind::Other;
+    wchar_t glyph  = 0;     // per-device icon override (0 = fall back to the kind's default)
     int  percent  = -1;     // -1 = unknown
     std::wstring text;      // shown instead of the percentage when set (coarse levels like "Low")
     bool charging = false;

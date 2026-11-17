@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "devices.h"
+#include "icons.h"
 #include "widget.h"
 
 namespace {
@@ -28,7 +29,8 @@ constexpr UINT PLACEHOLDER_ID = 1;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT,
-    ID_DEVICE_FIRST = 1000
+    ID_DEVICE_FIRST = 1000,
+    ID_ICON_FIRST = 3000  // + index into the (device, glyph) action list built by ShowMenu
 };
 
 const wchar_t* kAppName = L"Wireless Battery";
@@ -162,13 +164,78 @@ void SetAutostart(bool on) {
 // gives smooth edges on the transparent icon.
 
 struct Rgb { BYTE r, g, b; };
+Rgb Foreground();
 
-HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barColor, bool dim) {
+// Grayscale mask of a single font glyph, used to stamp the device icon into the tray icon.
+struct GlyphMask {
+    int w = 0, h = 0;
+    std::vector<BYTE> a;  // 0..255
+};
+
+HFONT MakeIconFont(int px) {
+    for (const wchar_t* face : { L"Segoe Fluent Icons", L"Segoe MDL2 Assets" }) {
+        HFONT f = CreateFontW(-px, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              ANTIALIASED_QUALITY, DEFAULT_PITCH, face);
+        HDC dc = CreateCompatibleDC(nullptr);
+        HGDIOBJ o = SelectObject(dc, f);
+        wchar_t got[LF_FACESIZE] = {};
+        GetTextFaceW(dc, LF_FACESIZE, got);
+        SelectObject(dc, o);
+        DeleteDC(dc);
+        bool isFallback = _wcsicmp(face, L"Segoe MDL2 Assets") == 0;
+        if (!_wcsicmp(got, face) || isFallback) return f;
+        DeleteObject(f);
+    }
+    return nullptr;
+}
+
+GlyphMask RenderGlyphMask(wchar_t glyph, int px) {
+    GlyphMask m;
+    HFONT f = MakeIconFont(px);
+    if (!f) return m;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, f);
+    wchar_t s[2] = { glyph, 0 };
+    SIZE sz;
+    GetTextExtentPoint32W(dc, s, 1, &sz);
+    const int W = sz.cx + 4, H = sz.cy + 4;
+    BITMAPINFO bi{};
+    bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ ob = SelectObject(dc, bmp);
+    memset(bits, 0, (size_t)W * H * 4);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    TextOutW(dc, 2, 2, s, 1);
+    GdiFlush();
+    auto* p = static_cast<DWORD*>(bits);
+    int x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            if (p[y * W + x] & 0xFF) { x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y); }
+    if (x1 >= 0) {
+        m.w = x1 - x0 + 1;
+        m.h = y1 - y0 + 1;
+        m.a.resize((size_t)m.w * m.h);
+        for (int y = 0; y < m.h; y++)
+            for (int x = 0; x < m.w; x++) m.a[y * m.w + x] = (BYTE)(p[(y0 + y) * W + x0 + x] & 0xFF);
+    }
+    SelectObject(dc, ob);
+    SelectObject(dc, of);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    DeleteObject(f);
+    return m;
+}
+
+HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barColor, bool dim, wchar_t glyph = 0) {
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
     UINT dpi = taskbar ? GetDpiForWindow(taskbar) : 0;
     const int S = GetSystemMetricsForDpi(SM_CXSMICON, dpi ? dpi : GetDpiForSystem());
     const int barH = std::max(2, S / 8);
     const int textH = S - barH - 1;
+    const int glyphBox = glyph ? std::max(7, S * 2 / 5) : 0;  // reserved top-right badge
 
     HDC dc = CreateCompatibleDC(nullptr);
     BITMAPINFO bi{};
@@ -204,7 +271,7 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
             for (int x = 0; x < W; x++)
                 if (sp[y * W + x] & 0xFF) { bx0 = std::min(bx0, x); bx1 = std::max(bx1, x); by0 = std::min(by0, y); by1 = std::max(by1, y); }
         if (bx1 < 0) break;
-        if (bx1 - bx0 + 1 <= S && by1 - by0 + 1 <= textH) break;
+        if (bx1 - bx0 + 1 <= S - glyphBox && by1 - by0 + 1 <= textH) break;
     }
 
     // final icon bitmap
@@ -222,10 +289,20 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
     };
     if (bx1 >= 0) {
         int gw = bx1 - bx0 + 1, gh = by1 - by0 + 1;
-        int ox = (S - gw) / 2, oy = (textH - gh) / 2;
+        int ox = (S - glyphBox - gw) / 2, oy = (textH - gh) / 2;
         for (int y = 0; y < gh; y++)
             for (int x = 0; x < gw; x++)
                 put(ox + x, oy + y, textColor, sp[(by0 + y) * W + (bx0 + x)] & 0xFF);
+    }
+    // device icon as a small badge in the top-right corner
+    if (glyph) {
+        GlyphMask gm = RenderGlyphMask(glyph, glyphBox);
+        if (gm.w && gm.h) {
+            int ox = S - gm.w - 1, oy = 0;
+            for (int y = 0; y < gm.h; y++)
+                for (int x = 0; x < gm.w; x++)
+                    put(ox + x, oy + y, Foreground(), gm.a[y * gm.w + x]);
+        }
     }
     // level bar: faint track + filled part
     int fill = barPct < 0 ? 0 : std::max(barPct > 0 ? 1 : 0, (barPct * S + 50) / 100);
@@ -256,7 +333,7 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
 
 Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }; }
 
-HICON IconFor(int pct, bool charging, bool dim) {
+HICON IconFor(int pct, bool charging, bool dim, wchar_t glyph = 0) {
     Rgb fg = Foreground();
     Rgb bar = charging        ? Rgb{ 0, 170, 255 }
             : pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
@@ -264,7 +341,7 @@ HICON IconFor(int pct, bool charging, bool dim) {
                               : Rgb{ 30, 190, 90 };
     Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
     std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
-    return RenderIcon(t, pct, text, bar, dim);
+    return RenderIcon(t, pct, text, bar, dim, glyph);
 }
 
 // ---- tray management --------------------------------------------------------------------------
@@ -343,10 +420,12 @@ void ApplyEntry(TrayEntry& e) {
     }
     int shown = s.percent >= 0 ? s.percent : e.lastPct;
     bool dim = s.percent < 0;
-    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k");
+    wchar_t glyph = DeviceGlyph(s.key, s.kind, s.via == L"Bluetooth");
+    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") +
+                       (g_lightTaskbar ? L"l" : L"k") + L"g" + std::to_wstring((int)glyph);
     if (sig != e.iconSig || !e.icon) {
         if (e.icon) DestroyIcon(e.icon);
-        e.icon = IconFor(shown, s.charging, dim);
+        e.icon = IconFor(shown, s.charging, dim, glyph);
         e.iconSig = sig;
     }
     std::wstring tip = s.name + L"\n" + StatusText(e);
@@ -388,6 +467,7 @@ void UpdateWidget() {
     for (auto* e : list) {
         WidgetItem it;
         it.kind = e->st.kind;
+        it.glyph = DeviceGlyph(e->st.key, e->st.kind, e->st.via == L"Bluetooth");
         it.percent = e->st.percent >= 0 ? e->st.percent : e->lastPct;
         if (e->st.percent >= 0) it.text = e->st.levelText;
         it.charging = e->st.charging;
@@ -492,12 +572,44 @@ void ShowMenu() {
     ApplyMenuTheme(g_lightTaskbar);
     HMENU m = CreatePopupMenu();
     std::vector<std::wstring> keys;  // menu id ID_DEVICE_FIRST + i -> device key
+    struct IconAction { std::wstring key; wchar_t glyph; };
+    std::vector<IconAction> iconActions;  // menu id ID_ICON_FIRST + i -> device / chosen glyph
+    auto iconLabel = [](wchar_t glyph) {
+        if (!glyph) return L"Default";
+        for (int i = 0; i < kIconChoiceCount; i++)
+            if (kIconChoices[i].glyph == glyph) return kIconChoices[i].label;
+        return L"Custom";
+    };
     if (g_entries.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
     else AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Click a device to show or hide it");
     for (auto& [k, e] : g_entries) {
         std::wstring line = e.st.name + L":  " + StatusText(e) + L"   [" + e.st.via + L"]";
         AppendMenuW(m, MF_STRING | (IsHidden(k) ? 0 : MF_CHECKED), ID_DEVICE_FIRST + (UINT)keys.size(), line.c_str());
         keys.push_back(k);
+    }
+    if (!g_entries.empty()) {
+        HMENU icons = CreatePopupMenu();
+        for (auto& [k, e] : g_entries) {
+            HMENU sub = CreatePopupMenu();
+            bool hasOverride = HasDeviceIcon(k);
+            wchar_t current = DeviceGlyph(k, e.st.kind, e.st.via == L"Bluetooth");
+            UINT first = ID_ICON_FIRST + (UINT)iconActions.size();
+            iconActions.push_back({ k, 0 });  // first entry: default
+            AppendMenuW(sub, MF_STRING | (hasOverride ? 0 : MF_CHECKED), first, L"Default (device type)");
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+            UINT selected = first;
+            for (int i = 0; i < kIconChoiceCount; i++) {
+                UINT id = ID_ICON_FIRST + (UINT)iconActions.size();
+                iconActions.push_back({ k, kIconChoices[i].glyph });
+                bool on = hasOverride && current == kIconChoices[i].glyph;
+                if (on) selected = id;
+                AppendMenuW(sub, MF_STRING | (on ? MF_CHECKED : 0), id, kIconChoices[i].label);
+            }
+            CheckMenuRadioItem(sub, first, first + kIconChoiceCount, selected, MF_BYCOMMAND);
+            std::wstring label = e.st.name + L"  (" + iconLabel(current) + L")";
+            AppendMenuW(icons, MF_POPUP, (UINT_PTR)sub, label.c_str());
+        }
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)icons, L"Change device icon...");
     }
     AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, L"Hide last known / asleep devices");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -528,7 +640,17 @@ void ShowMenu() {
         case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
-            if (cmd >= ID_DEVICE_FIRST && cmd < ID_DEVICE_FIRST + keys.size()) {
+            if (cmd >= ID_ICON_FIRST && cmd < ID_ICON_FIRST + iconActions.size()) {
+                const auto& a = iconActions[cmd - ID_ICON_FIRST];
+                SetDeviceIcon(a.key, a.glyph);
+                auto it = g_entries.find(a.key);
+                if (it != g_entries.end()) {
+                    it->second.iconSig.clear();  // force the tray icon to be rebuilt
+                    ApplyEntry(it->second);
+                }
+                UpdatePlaceholder();
+                UpdateWidget();
+            } else if (cmd >= ID_DEVICE_FIRST && cmd < ID_DEVICE_FIRST + keys.size()) {
                 const std::wstring& key = keys[cmd - ID_DEVICE_FIRST];
                 if (!g_hidden.erase(key)) g_hidden.insert(key);
                 SaveHidden();
@@ -689,6 +811,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_widgetBackground = LoadWidgetBackground();
     widget::SetBackground(g_widgetBackground);  // remembered by the widget across re-creation
     LoadHidden();
+    LoadDeviceIcons();
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);

@@ -35,13 +35,13 @@ test:
 	./build/ninjutso_driver_test.exe
 	$(CXX) $(CXXFLAGS) tests/vaxee_driver_test.cpp src/drivers/vaxee.cpp -o build/vaxee_driver_test.exe
 	./build/vaxee_driver_test.exe
-	$(CXX) $(CXXFLAGS) tests/finalmouse_driver_test.cpp src/drivers/finalmouse.cpp -o build/finalmouse_driver_test.exe
-	./build/finalmouse_driver_test.exe
 	$(CXX) $(CXXFLAGS) tests/keychron_driver_test.cpp src/drivers/keychron.cpp -o build/keychron_driver_test.exe
 	./build/keychron_driver_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/galaxy_buds_protocol_test.cpp -o build/galaxy_buds_protocol_test.exe
 	./build/galaxy_buds_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/logitech_g435_0adf_test.cpp -o build/logitech_g435_0adf_test.exe
 	./build/logitech_g435_0adf_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/device_icons_test.cpp src/icons.cpp -o build/device_icons_test.exe
+	./build/device_icons_test.exe
 
 .PHONY: clean test
